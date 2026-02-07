@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'scripts/**'
+  workflow_dispatch: # Allow manual trigger from GitHub UI
 
 jobs:
   sync:

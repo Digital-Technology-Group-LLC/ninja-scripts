@@ -147,6 +147,14 @@ def sync_script(token, file_path, existing_scripts):
     # Find existing script by name
     existing_script = next((s for s in existing_scripts if s['name'] == script_name), None)
 
+    # Content-based change detection to avoid redundant syncs
+    if existing_script:
+        ninja_text = existing_script.get('scriptConfig', {}).get('scriptText', '')
+        ninja_desc = existing_script.get('description', '')
+        if ninja_text == script_text and ninja_desc == script_description:
+            print(f"Skipping {script_name}: Content is identical to NinjaOne version.")
+            return
+
     # Preserve variable IDs if they exist to maintain task compatibility
     if existing_script and 'scriptVariables' in existing_script:
         id_map = {v['name']: v['id'] for v in existing_script['scriptVariables']}
@@ -199,8 +207,17 @@ if __name__ == "__main__":
         sys.exit(1)
 
     changed_files = sys.argv[1:]
+    
+    # If no files are passed (e.g., initial commit or manual run), scan the scripts directory
     if not changed_files:
-        print("No files to sync.")
+        print("No specific files provided. Scanning scripts/ directory for all scripts...")
+        changed_files = []
+        for root, dirs, files in os.walk('scripts'):
+            for file in files:
+                changed_files.append(os.path.join(root, file))
+        
+    if not changed_files:
+        print("No files found to sync.")
         sys.exit(0)
 
     try:

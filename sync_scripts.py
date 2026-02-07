@@ -4,9 +4,13 @@ import sys
 import json
 import base64
 import re
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if it exists
+load_dotenv()
 
 # Configuration from environment variables
-NINJAONE_INSTANCE_URL = os.environ.get("NINJAONE_INSTANCE_URL") # e.g., https://eu.ninjarmm.com
+NINJAONE_INSTANCE_URL = os.environ.get("NINJAONE_INSTANCE_URL") # e.g., https://app.ninjarmm.com
 NINJAONE_CLIENT_ID = os.environ.get("NINJAONE_CLIENT_ID")
 NINJAONE_CLIENT_SECRET = os.environ.get("NINJAONE_CLIENT_SECRET")
 
@@ -112,16 +116,75 @@ def get_scripts(token):
     response.raise_for_status()
     return response.json()
 
-def sync_script(token, file_path, existing_scripts):
+def log_change_plan(local, remote):
+    """Logs a pretty change set of what needs to be updated in the UI."""
+    script_name = local['name']
+    print("\n" + "="*60)
+    print(f"CHANGE PLAN for '{script_name}'")
+    print("="*60)
+    print("Manual update required in NinjaOne Web UI. Current API does not support script creation or updates.\n")
+
+    # Compare Description
+    if local.get('description') != remote.get('description'):
+        print("  - DESCRIPTION:")
+        print(f"    - CURRENT : {remote.get('description', '')}")
+        print(f"    + PROPOSED: {local.get('description', '')}")
+
+    # Note that code cannot be compared
+    print("  - SCRIPT CODE:")
+    print("    ~ The API does not allow fetching remote script code, so a manual comparison is required.")
+
+    # Compare Script Variables
+    def normalize_vars(variables):
+        # Normalize for comparison, ignoring fields that might not exist or differ in non-critical ways
+        return sorted([
+            {
+                "name": v.get("name"),
+                "description": v.get("description"),
+                "type": v.get("type"),
+                "required": v.get("required", False),
+                "defaultValue": v.get("defaultValue", None) # Use None for consistent comparison
+            } for v in variables
+        ], key=lambda x: x['name'])
+
+    local_vars = normalize_vars(local.get('scriptVariables', []))
+    remote_vars = normalize_vars(remote.get('scriptVariables', []))
+
+    if local_vars != remote_vars:
+        print("  - SCRIPT PARAMETERS (VARIABLES):")
+        remote_vars_map = {v['name']: v for v in remote_vars}
+        for l_var in local_vars:
+            r_var = remote_vars_map.get(l_var['name'])
+            if not r_var:
+                print(f"    + ADD: Parameter '{l_var['name']}'")
+                print(f"      - Details: {l_var}")
+            elif l_var != r_var:
+                print(f"    ~ MODIFY: Parameter '{l_var['name']}'")
+                for key in l_var:
+                    # Use .get() to avoid KeyErrors if a key is missing
+                    if l_var.get(key) != r_var.get(key):
+                        print(f"      - {key}: {r_var.get(key)}")
+                        print(f"      + {key}: {l_var.get(key)}")
+        
+        local_vars_map = {v['name']: v for v in local_vars}
+        for r_var in remote_vars:
+            if r_var['name'] not in local_vars_map:
+                print(f"    - REMOVE: Parameter '{r_var['name']}'")
+
+    print("="*60 + "\n")
+
+
+
+def sync_script(token, file_path, existing_scripts_list):
     file_name = os.path.basename(file_path)
     script_name = os.path.splitext(file_name)[0]
     extension = os.path.splitext(file_name)[1].lower()
 
     language_map = {
-        '.ps1': 'POWERSHELL',
-        '.sh': 'SHELL',
-        '.bat': 'BATCH',
-        '.cmd': 'BATCH'
+        '.ps1': 'powershell',
+        '.sh': 'shell',
+        '.bat': 'batch',
+        '.cmd': 'batch'
     }
 
     if extension not in language_map:
@@ -130,104 +193,103 @@ def sync_script(token, file_path, existing_scripts):
 
     script_language = language_map[extension]
 
-    with open(file_path, 'r') as f:
+    with open(file_path, 'r', encoding='utf-8') as f:
         script_text = f.read()
 
     # Parse metadata
-    script_description = f"Synced from GitHub: {file_name}"
-    script_variables = []
-    metadata = {}
+    metadata = parse_powershell_metadata(script_text) if extension == '.ps1' else {}
     
-    if extension == '.ps1':
-        metadata = parse_powershell_metadata(script_text)
-        if metadata["description"]:
-            script_description = metadata["description"]
-        script_variables = metadata["variables"]
+    # Find existing script by name in the list
+    existing_script = next((s for s in existing_scripts_list if s['name'] == script_name), None)
 
-    # Find existing script by name
-    existing_script = next((s for s in existing_scripts if s['name'] == script_name), None)
+    # Prepare local payload representation
+    encoded_code = base64.b64encode(script_text.encode('utf-8')).decode('utf-8')
 
-    # Content-based change detection to avoid redundant syncs
-    if existing_script:
-        ninja_text = existing_script.get('scriptConfig', {}).get('scriptText', '')
-        ninja_desc = existing_script.get('description', '')
-        if ninja_text == script_text and ninja_desc == script_description:
-            print(f"Skipping {script_name}: Content is identical to NinjaOne version.")
-            return
+    architectures = []
+    if "X86" in metadata.get("architecture", []):
+        architectures.append("32")
+    if "AMD64" in metadata.get("architecture", []):
+        architectures.append("64")
 
-    # Preserve variable IDs if they exist to maintain task compatibility
-    if existing_script and 'scriptVariables' in existing_script:
-        id_map = {v['name']: v['id'] for v in existing_script['scriptVariables']}
-        for v in script_variables:
-            if v['name'] in id_map:
-                v['id'] = id_map[v['name']]
+    operating_systems = []
+    if "WINDOWS" in metadata.get("operatingSystems", []):
+        operating_systems.append("Windows")
+    if "MAC" in metadata.get("operatingSystems", []):
+        operating_systems.append("Mac")
+    if "LINUX" in metadata.get("operatingSystems", []):
+        operating_systems.append("Linux")
 
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    }
+    script_variables = []
+    for var_meta in metadata.get("variables", []):
+        script_variables.append({
+            "name": var_meta['name'],
+            "description": var_meta.get('description', ''),
+            "type": var_meta.get('type', 'TEXT'),
+            "source": "LITERAL",
+            "defaultValue": var_meta.get('defaultValue'),
+            "required": var_meta.get('required', False),
+            "valueList": []
+        })
 
-    payload = {
+    local_payload = {
         "name": script_name,
-        "description": script_description,
-        "scriptConfig": {
-            "scriptLanguage": script_language,
-            "scriptText": script_text
-        },
+        "description": metadata.get("description", f"From {file_name}"),
+        "language": script_language,
+        "operatingSystems": operating_systems,
+        "architecture": architectures,
+        "code": encoded_code,
         "scriptVariables": script_variables
     }
 
-    if metadata.get("operatingSystems"):
-        payload["operatingSystems"] = metadata["operatingSystems"]
-    if metadata.get("architecture"):
-        payload["architecture"] = metadata["architecture"]
-
     if existing_script:
-        # Update existing
-        script_id = existing_script['id']
-        url = f"{NINJAONE_INSTANCE_URL}/v2/automation/scripts/{script_id}"
-        print(f"Updating existing script: {script_name} (ID: {script_id})")
-        # Note: PUT might not be supported if it's not in the API yet, 
-        # but usually it matches the resource.
-        response = requests.put(url, headers=headers, json=payload)
+        # Script exists, generate change plan based on metadata comparison
+        print(f"Found existing script '{script_name}' (ID: {existing_script['id']}). Comparing metadata...")
+        log_change_plan(local_payload, existing_script)
     else:
-        # Create new
-        url = f"{NINJAONE_INSTANCE_URL}/v2/automation/scripts"
-        print(f"Creating new script: {script_name}")
-        response = requests.post(url, headers=headers, json=payload)
+        # Script does not exist, log a plan to create it
+        print("\n" + "="*60)
+        print(f"CHANGE PLAN for '{script_name}' (NEW SCRIPT)")
+        print("="*60)
+        print("This script does not exist in NinjaOne. Manual creation is required.\n")
+        print("  - Name: " + local_payload['name'])
+        print("  - Description: " + local_payload['description'])
+        print("  - Language: " + local_payload['language'])
+        print("  - Operating Systems: " + ", ".join(local_payload['operatingSystems']))
+        print("  - Architecture: " + ", ".join(local_payload['architecture']))
+        print("\n  - Parameters to create:")
+        for var in local_payload['scriptVariables']:
+            print(f"    - {var['name']} (Type: {var['type']}, Required: {var['required']})")
+        print("\n  - Code: Copy the contents of the local file.")
+        print("="*60 + "\n")
 
-    if response.status_code not in [200, 201, 204]:
-        print(f"Error syncing {script_name}: {response.status_code} - {response.text}")
-    else:
-        print(f"Successfully synced {script_name}")
-
-if __name__ == "__main__":
+def main():
+    """Main function to run the sync process."""
     if not all([NINJAONE_INSTANCE_URL, NINJAONE_CLIENT_ID, NINJAONE_CLIENT_SECRET]):
-        print("Missing required environment variables.")
+        print("ERROR: Required environment variables (NINJAONE_INSTANCE_URL, NINJAONE_CLIENT_ID, NINJAONE_CLIENT_SECRET) are not set.", file=sys.stderr)
         sys.exit(1)
-
-    changed_files = sys.argv[1:]
-    
-    # If no files are passed (e.g., initial commit or manual run), scan the scripts directory
-    if not changed_files:
-        print("No specific files provided. Scanning scripts/ directory for all scripts...")
-        changed_files = []
-        for root, dirs, files in os.walk('scripts'):
-            for file in files:
-                changed_files.append(os.path.join(root, file))
-        
-    if not changed_files:
-        print("No files found to sync.")
-        sys.exit(0)
 
     try:
         token = get_token()
+        print("Successfully authenticated with NinjaOne.")
+        
+        print("Fetching list of existing scripts from NinjaOne...")
         existing_scripts = get_scripts(token)
+        print(f"Found {len(existing_scripts)} existing scripts.")
 
-        for file_path in changed_files:
-            if file_path.startswith('scripts/'):
-                if os.path.isfile(file_path):
-                    sync_script(token, file_path, existing_scripts)
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Failed to communicate with NinjaOne API. {e}", file=sys.stderr)
         sys.exit(1)
+
+    scripts_dir = 'scripts'
+    if not os.path.isdir(scripts_dir):
+        print(f"ERROR: '{scripts_dir}' directory not found.", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"\nScanning '{scripts_dir}' directory for scripts to process...")
+    for root, _, files in os.walk(scripts_dir):
+        for file in files:
+            file_path = os.path.join(root, file)
+            sync_script(token, file_path, existing_scripts)
+
+if __name__ == "__main__":
+    main()

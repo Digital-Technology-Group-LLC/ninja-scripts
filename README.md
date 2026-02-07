@@ -1,77 +1,57 @@
-# NinjaOne Script Synchronization
+# NinjaOne Script Change Plan Generator
 
-This repository contains automation scripts for the NinjaOne MSP platform. These scripts are automatically synchronized with the NinjaOne Script Library whenever changes are pushed to the `main` branch.
+This Python script automates the process of comparing local PowerShell scripts with the scripts in your NinjaOne instance. It generates a clear and actionable "change plan" that you can use to manually synchronize your scripts, ensuring your NinjaOne environment stays consistent with your version-controlled repository.
 
-## Directory Structure
+## Features
 
-- `scripts/powershell/`: PowerShell scripts (.ps1)
-- `scripts/bash/`: Bash scripts (.sh)
-- `scripts/cmd/`: Batch scripts (.bat, .cmd)
+- **OAuth 2.0 Authentication**: Securely connects to the NinjaOne API using client credentials.
+- **Intelligent PowerShell Parsing**: Automatically extracts script metadata directly from your `.ps1` files:
+    - **Description**: Parses the `.DESCRIPTION` block from comment-based help.
+    - **Parameters**: Parses the `Param()` block to define script variables, including their type, name, description, default value, and mandatory status.
+    - **OS & Architecture**: Reads special comments (`# NINJA_OS:` and `# NINJA_ARCH:`) to determine target operating systems and architectures.
+- **Change Detection**: Compares local scripts against the list of scripts in NinjaOne to identify what's new and what has changed.
+- **Detailed Change Plan**:
+    - For **new scripts**, it provides a complete guide for manual creation in the NinjaOne UI.
+    - For **existing scripts**, it details the specific metadata differences (like description or parameters) that require a manual update.
 
-## How to add a new script
+## How It Works
 
-1. Create a new script file in the appropriate directory under `scripts/`.
-2. The name of the file (without extension) will be used as the script name in NinjaOne.
-3. Commit and push your changes to the `main` branch.
+The script performs a read-only comparison:
 
-## Script Metadata (PowerShell)
+1.  It authenticates with the NinjaOne API to get an access token.
+2.  It fetches a list of all scripts currently in your NinjaOne instance.
+3.  It scans your local `scripts/` directory for PowerShell files.
+4.  For each local script, it parses the file to build a "local" version of the script's metadata.
+5.  It then compares this local version to the data fetched from NinjaOne and prints a detailed plan for any necessary manual creations or updates.
 
-The synchronization engine automatically extracts metadata from PowerShell scripts to configure NinjaOne UI settings.
+## Setup
 
-### Supported Tags
+1.  **Prerequisites**:
+    - Python 3.6+
+    - `requests` and `python-dotenv` libraries. Install them with:
+      ```bash
+      pip install requests python-dotenv
+      ```
 
-| Feature | PowerShell Construct | NinjaOne Usage |
-|---------|-----------------------|----------------|
-| **Description** | `.DESCRIPTION` in help block | Populates the "Description" field in NinjaOne. |
-| **Variables** | `param()` block variables | Creates Script Variables (Parameters). |
-| **Var Description**| `.PARAMETER <Name>` in help | Hover-over info for the variable. |
-| **Var Type** | `[int]`, `[string]`, `[bool]` | Sets variable type (INTEGER, TEXT, CHECKBOX). |
-| **Default Value**| `$Var = "Value"` | Sets the default value in NinjaOne. |
-| **Required** | `[Parameter(Mandatory=$true)]`| Marks the variable as required. |
-| **OS Support** | `# NINJA_OS: WINDOWS, MAC` | Sets applicable Operating Systems. |
-| **Architecture** | `# NINJA_ARCH: X64` | Sets applicable Architectures. |
+2.  **Configuration**:
+    - Create a `.env` file in the root of this repository.
+    - Add your NinjaOne API credentials to the `.env` file:
+      ```env
+      NINJAONE_INSTANCE_URL="https://app.ninjarmm.com"
+      NINJAONE_CLIENT_ID="YOUR_CLIENT_ID"
+      NINJAONE_CLIENT_SECRET="YOUR_CLIENT_SECRET"
+      ```
+      *(Replace with your actual instance URL if it's different)*
 
-### Example Structure
+3.  **Directory Structure**:
+    - Place your PowerShell scripts inside the `scripts/powershell/` directory. The script will automatically scan this location.
 
-```powershell
-<#
-.SYNOPSIS
-    My Awesome Script
-.DESCRIPTION
-    This script performs complex operations.
-.PARAMETER ServerId
-    The ID of the server to target.
-#>
+## Usage
 
-# NINJA_OS: WINDOWS
-# NINJA_ARCH: X64
+To run the script and generate a change plan for all scripts, simply execute it from your terminal:
 
-param(
-    [Parameter(Mandatory=$true)]
-    [int]$ServerId = 1234
-)
+```bash
+python sync_scripts.py
 ```
 
-## Configuration
-
-The GitHub Action requires the following secrets to be configured in the repository:
-
-- `NINJAONE_INSTANCE_URL`: Your NinjaOne instance URL (e.g., `https://eu.ninjarmm.com` or `https://app.ninjarmm.com`).
-- `NINJAONE_CLIENT_ID`: Your API Client ID.
-- `NINJAONE_CLIENT_SECRET`: Your API Client Secret.
-
-### NinjaOne Portal Setup
-When creating the **Client App** in NinjaOne, use the following settings:
-- **Application Platform**: `API Services (machine-to-machine)`
-- **Allowed Grant Types**: `Client credentials`
-- **Scopes**: `Monitoring`, `Management`, `Control`
-
-Make sure your API Client has the following scopes:
-- `monitoring`
-- `management`
-- `control`
-- `automation` (if available)
-
-## Sync Script
-
-The synchronization is handled by `sync_scripts.py`. This script checks for existing scripts in your NinjaOne library by name; if a script with the same name exists, it updates it. Otherwise, it creates a new one.
+The script will output a series of change plans to the console, detailing the manual steps required to sync your local repository with NinjaOne.
